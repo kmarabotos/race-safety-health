@@ -3,23 +3,19 @@ import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 
 /**
- * Race Safety Health Web MVP v4 (full working component)
- * EMBOK × FMEA × STPA/STAMP
- * Features:
- * - Bilingual EN/GR toggle (simple i18n)
- * - Templates (roadShort / roadMarathon / trailUltra)
- * - Roles view (domains + controls visibility)
- * - Hazards with FMEA residual RPN
- * - Controls health with UCA penalties
- * - Critical constraints gate (STAMP)
- * - Readiness sliders per domain (EMBOK)
- * - Course segments (zones) filter
- * - Incident quick log that increases Occurrence (O)
- * - LocalStorage persistence
- * - PDF export
+ * Race Safety Health Web — v4.1 (extended scoring)
+ * - Bilingual EN/GR
+ * - Templates: Road 5/10K, Half/Marathon, Trail/Ultra
+ * - Role-based views
+ * - Course segments filtering
+ * - FMEA hazards (S/O/D + controlsActive) with Residual RPN
+ * - STPA controls (readiness + UCA penalties)
+ * - STAMP critical constraints
+ * - Incident log increases Occurrence
+ * - NEW: Readiness sub-criteria per domain (manual scoring)
+ * - NEW: Classic fuel-gauge style (thin arc, no rounded caps)
  *
- * Tailwind assumed.
- * npm i jspdf jspdf-autotable
+ * Drop into /src as RaceSafetyMVP.jsx and import in App.jsx.
  */
 
 // -----------------------------
@@ -28,12 +24,12 @@ import autoTable from "jspdf-autotable";
 const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
 const sum = (arr) => arr.reduce((a, b) => a + b, 0);
 const avg = (arr) => (arr.length ? sum(arr) / arr.length : 0);
+const pct = (x) => Math.round(clamp(x * 100, 0, 100));
 
 function polarToCartesian(cx, cy, r, angleDeg) {
   const a = (angleDeg - 90) * (Math.PI / 180);
   return { x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) };
 }
-
 function describeArc(cx, cy, r, startAngle, endAngle) {
   const start = polarToCartesian(cx, cy, r, endAngle);
   const end = polarToCartesian(cx, cy, r, startAngle);
@@ -44,10 +40,7 @@ function describeArc(cx, cy, r, startAngle, endAngle) {
 // -----------------------------
 // Simple i18n
 // -----------------------------
-const LANGS = [
-  { code: "en", label: "EN" },
-  { code: "el", label: "GR" },
-];
+const LANGS = [{ code: "en", label: "EN" }, { code: "el", label: "GR" }];
 
 const I18N = {
   en: {
@@ -61,6 +54,7 @@ const I18N = {
     segmentsTitle: "Course Segments (Zones)",
     segmentsHint: "Tap to filter hazards by location",
     domainsTitle: "Domains (EMBOK)",
+    domainsHint: "Score sub-criteria to set readiness",
     hazardsTitle: "Hazards (FMEA)",
     hazardsHint: "Residual RPN after controls",
     controlsTitle: "Control Loops (STPA)",
@@ -106,7 +100,9 @@ const I18N = {
     ucaCount: "UCA count",
     severityLabel: (n) => `Severity ${n}`,
     notesPlaceholder: "Notes (optional)",
-    mvpFooter: "MVP v4 — roles, PDF export, persistence, course segments, bilingual UI.",
+    addNote: "Add note",
+    subCriteria: "Sub‑criteria",
+    mvpFooter: "v4.1 — extended readiness scoring, PDF export, persistence, segments, bilingual UI.",
   },
   el: {
     appTitle: "Ασφάλεια Αγώνα Δρόμου",
@@ -119,6 +115,7 @@ const I18N = {
     segmentsTitle: "Τμήματα Διαδρομής (Ζώνες)",
     segmentsHint: "Πατήστε για φιλτράρισμα κινδύνων ανά τοποθεσία",
     domainsTitle: "Τομείς (EMBOK)",
+    domainsHint: "Βαθμολόγησε υπο‑κριτήρια",
     hazardsTitle: "Κίνδυνοι (FMEA)",
     hazardsHint: "Υπολειπόμενο RPN μετά τους ελέγχους",
     controlsTitle: "Βρόχοι Ελέγχου (STPA)",
@@ -164,11 +161,15 @@ const I18N = {
     ucaCount: "Πλήθος UCA",
     severityLabel: (n) => `Σοβαρότητα ${n}`,
     notesPlaceholder: "Σημειώσεις (προαιρετικό)",
-    mvpFooter: "MVP v4 — ρόλοι, εξαγωγή PDF, αποθήκευση, ζώνες διαδρομής, δίγλωσσο UI.",
+    addNote: "Προσθήκη σημείωσης",
+    subCriteria: "Υπο‑κριτήρια",
+    mvpFooter: "v4.1 — αναλυτική βαθμολόγηση ετοιμότητας, PDF, αποθήκευση, ζώνες, δίγλωσσο UI.",
   },
 };
 
-// Labels for domains, roles, controls, templates, incidents
+// -----------------------------
+// Labels / Canonical EN keys
+// -----------------------------
 const DOMAINS_EN = [
   "Financial",
   "Organizational",
@@ -181,7 +182,6 @@ const DOMAINS_EN = [
   "Environmental",
   "Security – Threats",
 ];
-
 const DOMAINS_EL = [
   "Οικονομικά",
   "Οργανωτικά",
@@ -207,7 +207,6 @@ const ROLES_EN = [
   "Legal / Compliance Lead",
   "Sports / Course Lead",
 ];
-
 const ROLES_EL = [
   "Διευθυντής Αγώνα",
   "Υπεύθυνος Λειτουργιών",
@@ -246,125 +245,66 @@ const TEMPLATES_LABELS = {
   trailUltra: { en: "Trail / Ultra", el: "Ορεινό / Υπέρ-Αγώνας" },
 };
 
-// localStorage helpers
-const LS_KEY = "raceSafetyMVP.v4";
-const loadLS = () => {
-  try {
-    const raw = localStorage.getItem(LS_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
-  }
+// -----------------------------
+// Readiness sub-criteria (manual scoring)
+// Each criterion has weight (default 1)
+// -----------------------------
+const READINESS_CRITERIA = {
+  "Financial": [
+    { id: "budget", en: "Budget secured", el: "Εξασφαλισμένος προϋπολογισμός" },
+    { id: "sponsors", en: "Sponsors/contracts signed", el: "Συμφωνίες χορηγών/συμβάσεων" },
+    { id: "cashflow", en: "Cashflow / payments plan", el: "Ρευστότητα / πλάνο πληρωμών" },
+  ],
+  "Organizational": [
+    { id: "plan", en: "Operational plan complete", el: "Ολοκληρωμένο επιχειρησιακό σχέδιο" },
+    { id: "comms", en: "Internal comms structure", el: "Δομή εσωτερικής επικοινωνίας" },
+    { id: "briefings", en: "Staff/volunteer briefings", el: "Briefings προσωπικού/εθελοντών" },
+  ],
+  "Health / Sanitary": [
+    { id: "medicalPlan", en: "Medical plan approved", el: "Εγκεκριμένο υγειονομικό σχέδιο" },
+    { id: "aed", en: "AED coverage ready", el: "Έτοιμη κάλυψη AED" },
+    { id: "hydration", en: "Hydration/heat plan", el: "Πλάνο ενυδάτωσης/ζέστης" },
+  ],
+  "Legal": [
+    { id: "permits", en: "All permits issued", el: "Έχουν εκδοθεί οι άδειες" },
+    { id: "insurance", en: "Insurance active", el: "Ενεργή ασφάλιση" },
+    { id: "waivers", en: "Waivers/rules published", el: "Κανονισμοί/δηλώσεις συμμετοχής" },
+  ],
+  "Operational": [
+    { id: "traffic", en: "Traffic plan & closures", el: "Σχέδιο κυκλοφορίας/κλεισίματα" },
+    { id: "vendors", en: "Vendors confirmed", el: "Επιβεβαίωση προμηθευτών" },
+    { id: "logistics", en: "Logistics ready", el: "Logistics έτοιμα" },
+    { id: "signage", en: "Signage & wayfinding", el: "Σήμανση/καθοδήγηση" },
+  ],
+  "Sports": [
+    { id: "courseCert", en: "Course measured/certified", el: "Μετρημένη/πιστοποιημένη διαδρομή" },
+    { id: "timing", en: "Timing/results provider ready", el: "Έτοιμος πάροχος χρονομέτρησης" },
+    { id: "stations", en: "Aid stations plan", el: "Πλάνο σταθμών υποστήριξης" },
+  ],
+  "Public Relations / Publicity": [
+    { id: "mediaPlan", en: "Media plan ready", el: "Έτοιμο media plan" },
+    { id: "crisis", en: "Crisis comms prepared", el: "Πλάνο επικοινωνίας κρίσης" },
+    { id: "athleteInfo", en: "Athlete info sent", el: "Ενημέρωση αθλητών" },
+  ],
+  "Human Resources": [
+    { id: "staffing", en: "Staffing complete", el: "Ολοκληρωμένη στελέχωση" },
+    { id: "volunteers", en: "Volunteers recruited", el: "Στρατολόγηση εθελοντών" },
+    { id: "training", en: "Training delivered", el: "Δόθηκαν εκπαιδεύσεις" },
+  ],
+  "Environmental": [
+    { id: "waste", en: "Waste plan", el: "Πλάνο απορριμμάτων" },
+    { id: "trailProtect", en: "Course protection", el: "Προστασία διαδρομής" },
+    { id: "weather", en: "Weather monitoring", el: "Παρακολούθηση καιρού" },
+  ],
+  "Security – Threats": [
+    { id: "riskAssess", en: "Threat assessment", el: "Αξιολόγηση απειλών" },
+    { id: "perimeter", en: "Security perimeter", el: "Ζώνες ασφαλείας" },
+    { id: "response", en: "Incident response ready", el: "Ετοιμότητα αντίδρασης" },
+  ],
 };
-const saveLS = (state) => {
-  try {
-    localStorage.setItem(LS_KEY, JSON.stringify(state));
-  } catch {}
-};
 
 // -----------------------------
-// Gauge Component
-// -----------------------------
-function SafetyGauge({ t, value = 0, lockedRed = false, label, prevValue = null }) {
-  const v = clamp(value, 0, 100);
-  const displayValue = lockedRed ? 0 : v;
-
-  const startAngle = 180;
-  const endAngle = 0;
-  const angleRange = startAngle - endAngle;
-  const needleAngle = startAngle - (displayValue / 100) * angleRange;
-
-  const segs = [
-    { from: 0, to: 59, className: "stroke-red-500" },
-    { from: 60, to: 79, className: "stroke-amber-400" },
-    { from: 80, to: 100, className: "stroke-emerald-500" },
-  ];
-
-  const statusKey = lockedRed || v < 60 ? "notHealthy" : v < 80 ? "watch" : "healthy";
-  const status = t(statusKey);
-
-  const trend = prevValue == null ? 0 : v - prevValue;
-  const trendLabel = trend > 1 ? t("improving") : trend < -1 ? t("degrading") : t("stable");
-
-  const ticks = Array.from({ length: 11 }, (_, i) => i * 10);
-
-  return (
-    <div className="w-full max-w-2xl mx-auto p-4">
-      <div className="text-center mb-2">
-        <h2 className="text-xl font-semibold tracking-tight">{label}</h2>
-        <div className="text-xs text-slate-500">
-          {t("trend")}: {trendLabel}
-          {trend !== 0 && !lockedRed ? ` (${trend > 0 ? "+" : ""}${Math.round(trend)}%)` : ""}
-        </div>
-      </div>
-
-      <svg viewBox="0 0 300 190" className="w-full h-auto">
-        <path d={describeArc(150, 165, 120, 180, 0)} className="stroke-slate-200" strokeWidth="22" fill="none" />
-
-        {segs.map((s, i) => {
-          const a0 = startAngle - (s.from / 100) * angleRange;
-          const a1 = startAngle - (s.to / 100) * angleRange;
-          return (
-            <path
-              key={i}
-              d={describeArc(150, 165, 120, a0, a1)}
-              className={s.className}
-              strokeWidth="22"
-              fill="none"
-              strokeLinecap="round"
-            />
-          );
-        })}
-
-        {ticks.map((tt) => {
-          const ang = startAngle - (tt / 100) * angleRange;
-          const p1 = polarToCartesian(150, 165, 104, ang);
-          const p2 = polarToCartesian(150, 165, 118, ang);
-          const labelPos = polarToCartesian(150, 165, 86, ang);
-          return (
-            <g key={tt}>
-              <line x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y} className="stroke-slate-400" strokeWidth={tt % 20 === 0 ? 2 : 1} />
-              {tt % 20 === 0 && (
-                <text x={labelPos.x} y={labelPos.y} textAnchor="middle" className="fill-slate-500 text-[10px] font-semibold">{tt}</text>
-              )}
-            </g>
-          );
-        })}
-
-        <g>
-          <line
-            x1="150" y1="165"
-            x2={polarToCartesian(150, 165, 90, needleAngle).x}
-            y2={polarToCartesian(150, 165, 90, needleAngle).y}
-            className={lockedRed ? "stroke-red-700" : "stroke-slate-900"}
-            strokeWidth="4"
-          />
-          <circle cx="150" cy="165" r="8" className={lockedRed ? "fill-red-700" : "fill-slate-900"} />
-        </g>
-
-        <text x="150" y="118" textAnchor="middle" className="fill-slate-900 text-4xl font-bold">
-          {Math.round(v)}%
-        </text>
-
-        <text
-          x="150" y="145" textAnchor="middle"
-          className={`text-base font-semibold ${
-            statusKey === "healthy" ? "fill-emerald-600" : statusKey === "watch" ? "fill-amber-600" : "fill-red-600"
-          }`}
-        >
-          {lockedRed ? t("constraintFail") : status}
-        </text>
-      </svg>
-
-      <div className="text-center text-sm text-slate-600 -mt-2">
-        {lockedRed ? t("constraintHint") : t("holisticHint")}
-      </div>
-    </div>
-  );
-}
-
-// -----------------------------
-// Domains / Roles / Visibility
+// Roles visibility
 // -----------------------------
 const DOMAINS = DOMAINS_EN;
 const ROLES = ROLES_EN;
@@ -422,7 +362,6 @@ const TEMPLATES = {
       { id: "SEG-ALL", name: "Whole course" },
     ],
   },
-
   roadMarathon: {
     label: TEMPLATES_LABELS.roadMarathon.en,
     hazards: [
@@ -449,7 +388,6 @@ const TEMPLATES = {
       { id: "SEG-ALL", name: "Whole course" },
     ],
   },
-
   trailUltra: {
     label: TEMPLATES_LABELS.trailUltra.en,
     hazards: [
@@ -477,6 +415,7 @@ const TEMPLATES = {
   },
 };
 
+// STPA controls
 const INITIAL_CONTROLS = [
   { id: "C1", name: "Heat / Cold Protocol", readiness: 0.7, ucaCount: 1 },
   { id: "C2", name: "Traffic / Course Separation", readiness: 0.8, ucaCount: 0 },
@@ -486,291 +425,352 @@ const INITIAL_CONTROLS = [
   { id: "C6", name: "Trail Sweep / Search & Rescue", readiness: 0.65, ucaCount: 1 },
 ];
 
-const INITIAL_READINESS = DOMAINS.reduce((acc, d) => {
-  acc[d] = 0.75;
-  return acc;
-}, {});
+// -----------------------------
+// Persistence
+// -----------------------------
+const LS_KEY = "raceSafetyMVP.v41";
+const loadLS = () => {
+  try { const raw = localStorage.getItem(LS_KEY); return raw ? JSON.parse(raw) : null; }
+  catch { return null; }
+};
+const saveLS = (state) => {
+  try { localStorage.setItem(LS_KEY, JSON.stringify(state)); } catch {}
+};
+
+// -----------------------------
+// Fuel Gauge Component
+// -----------------------------
+function SafetyGauge({ t, value = 0, lockedRed = false, label, prevValue = null }) {
+  const v = clamp(value, 0, 100);
+  const displayValue = lockedRed ? 0 : v;
+
+  const startAngle = 180;
+  const endAngle = 0;
+  const angleRange = startAngle - endAngle;
+  const needleAngle = startAngle - (displayValue / 100) * angleRange;
+
+  const segs = [
+    { from: 0, to: 49, className: "stroke-red-500" },
+    { from: 50, to: 74, className: "stroke-amber-400" },
+    { from: 75, to: 100, className: "stroke-emerald-500" },
+  ];
+
+  const statusKey = lockedRed || v < 50 ? "notHealthy" : v < 75 ? "watch" : "healthy";
+  const status = t(statusKey);
+
+  const trend = prevValue == null ? 0 : v - prevValue;
+  const trendLabel = trend > 1 ? t("improving") : trend < -1 ? t("degrading") : t("stable");
+
+  const ticks = Array.from({ length: 11 }, (_, i) => i * 10);
+
+  return (
+    <div className="w-full max-w-3xl mx-auto p-4">
+      <div className="text-center mb-2">
+        <h2 className="text-xl font-semibold tracking-tight">{label}</h2>
+        <div className="text-xs text-slate-500">
+          {t("trend")}: {trendLabel}
+          {trend !== 0 && !lockedRed ? ` (${trend > 0 ? "+" : ""}${Math.round(trend)}%)` : ""}
+        </div>
+      </div>
+
+      <svg viewBox="0 0 300 190" className="w-full h-auto">
+        {/* background arc */}
+        <path d={describeArc(150, 165, 120, 180, 0)} className="stroke-slate-200" strokeWidth="14" fill="none" />
+
+        {/* colored segments */}
+        {segs.map((s, i) => {
+          const a0 = startAngle - (s.from / 100) * angleRange;
+          const a1 = startAngle - (s.to / 100) * angleRange;
+          return (
+            <path
+              key={i}
+              d={describeArc(150, 165, 120, a0, a1)}
+              className={s.className}
+              strokeWidth="14"
+              fill="none"
+            />
+          );
+        })}
+
+        {/* ticks */}
+        {ticks.map((tt) => {
+          const ang = startAngle - (tt / 100) * angleRange;
+          const p1 = polarToCartesian(150, 165, 106, ang);
+          const p2 = polarToCartesian(150, 165, 120, ang);
+          const labelPos = polarToCartesian(150, 165, 88, ang);
+          return (
+            <g key={tt}>
+              <line x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y} className="stroke-slate-400" strokeWidth={tt % 20 === 0 ? 2 : 1} />
+              {tt % 20 === 0 && (
+                <text x={labelPos.x} y={labelPos.y} textAnchor="middle" className="fill-slate-500 text-[10px] font-semibold">
+                  {tt}
+                </text>
+              )}
+            </g>
+          );
+        })}
+
+        {/* needle */}
+        <g>
+          <line
+            x1="150" y1="165"
+            x2={polarToCartesian(150, 165, 92, needleAngle).x}
+            y2={polarToCartesian(150, 165, 92, needleAngle).y}
+            className={lockedRed ? "stroke-red-700" : "stroke-slate-900"}
+            strokeWidth="4"
+          />
+          <circle cx="150" cy="165" r="8" className={lockedRed ? "fill-red-700" : "fill-slate-900"} />
+        </g>
+
+        <text x="150" y="118" textAnchor="middle" className="fill-slate-900 text-4xl font-bold">
+          {Math.round(v)}%
+        </text>
+
+        <text x="150" y="145" textAnchor="middle"
+          className={`text-base font-semibold ${
+            statusKey === "healthy" ? "fill-emerald-600" : statusKey === "watch" ? "fill-amber-600" : "fill-red-600"
+          }`}
+        >
+          {lockedRed ? t("constraintFail") : status}
+        </text>
+      </svg>
+
+      <div className="text-center text-sm text-slate-600 -mt-2">
+        {lockedRed ? t("constraintHint") : t("holisticHint")}
+      </div>
+    </div>
+  );
+}
 
 // -----------------------------
 // Scoring Engine
 // -----------------------------
-function calcHazardResidualRPN(h) {
-  // base RPN = S*O*D, reduced by controlsActive (0..1)
+function residualRpn(h) {
   const base = h.S * h.O * h.D;
-  const reduction = clamp(h.controlsActive ?? 0.7, 0, 1);
-  const residual = base * (1 - reduction);
-  return residual;
+  return base * (1 - clamp(h.controlsActive, 0, 1)) * (h.weight ?? 1);
 }
-
-function calcRiskLoad(hazards) {
-  // Weighted normalized risk (0..100)
-  if (!hazards.length) return 0;
-  const weightedResiduals = hazards.map((h) => calcHazardResidualRPN(h) * (h.weight ?? 1));
-  // Rough max per hazard (10*10*10=1000) then after controls ~1000
-  const maxPerHazard = 1000;
-  const maxTotal = maxPerHazard * hazards.length;
-  const ratio = sum(weightedResiduals) / maxTotal;
-  // translate to "health": high risk -> low health
-  return clamp((1 - ratio) * 100, 0, 100);
+function domainRiskScore(hazards, domain) {
+  const hs = hazards.filter((h) => h.domain === domain);
+  if (!hs.length) return 0;
+  const rpnVals = hs.map(residualRpn);
+  return avg(rpnVals);
 }
-
-function calcControlsHealth(controls) {
-  if (!controls.length) return 0;
-  const penalties = controls.map((c) => clamp(c.readiness - 0.1 * (c.ucaCount ?? 0), 0, 1));
-  return clamp(avg(penalties) * 100, 0, 100);
+function normalizeRiskToPct(risk) {
+  // typical RPN max is 10*10*10=1000; scale to 0-100
+  return clamp(risk / 10, 0, 100);
 }
-
-function calcReadinessScore(readinessByDomain, visibleDomains) {
-  const vals = visibleDomains.map((d) => readinessByDomain[d] ?? 0.75);
-  return clamp(avg(vals) * 100, 0, 100);
+function controlHealthPct(controls) {
+  if (!controls.length) return 100;
+  const adjusted = controls.map((c) => clamp(c.readiness - c.ucaCount * 0.06, 0, 1));
+  return pct(avg(adjusted));
 }
-
-function calcHolisticHealth({ riskLoad, controlsHealth, readinessScore }) {
-  // simple balanced average
-  return clamp(avg([riskLoad, controlsHealth, readinessScore]), 0, 100);
-}
-
-function anyCriticalConstraintFail(constraints) {
-  return constraints.some((c) => c.critical && c.status === "fail");
+function readinessFromCriteria(criteriaMap, criteriaValues) {
+  // returns readiness per domain (0..1) as weighted average of sub-criteria
+  const out = {};
+  DOMAINS.forEach((d) => {
+    const crits = criteriaMap[d] || [];
+    if (!crits.length) { out[d] = 0.75; return; }
+    const vals = crits.map((c) => {
+      const v = criteriaValues?.[d]?.[c.id];
+      return typeof v === "number" ? v : 0.75;
+    });
+    out[d] = avg(vals);
+  });
+  return out;
 }
 
 // -----------------------------
-// Main Component
+// PDF Export
+// -----------------------------
+function exportPdf({ t, lang, templateLabel, roleLabel, hazards, controls, constraints, readiness, incidents }) {
+  const doc = new jsPDF();
+  doc.setFontSize(16);
+  doc.text(`${t("appTitle")} — ${templateLabel}`, 14, 16);
+  doc.setFontSize(11);
+  doc.text(`${t("roleView")}: ${roleLabel}`, 14, 24);
+
+  // Readiness table
+  autoTable(doc, {
+    startY: 30,
+    head: [[t("domain"), t("readinessShort") + " %"]],
+    body: DOMAINS.map((d, i) => [
+      lang === "el" ? DOMAINS_EL[i] : d,
+      pct(readiness[d]),
+    ]),
+  });
+
+  // Hazards table
+  const hazY = (doc.lastAutoTable?.finalY ?? 30) + 8;
+  autoTable(doc, {
+    startY: hazY,
+    head: [[t("hazard"), t("domain"), t("segment"), t("s"), t("o"), t("d"), t("controlsActive"), t("residualRpn")]],
+    body: hazards.map((h) => [
+      h.name,
+      h.domain,
+      h.segmentId,
+      h.S,
+      h.O,
+      h.D,
+      Math.round(h.controlsActive * 100) + "%",
+      Math.round(residualRpn(h)),
+    ]),
+  });
+
+  // Controls table
+  const ctrlY = (doc.lastAutoTable?.finalY ?? hazY) + 8;
+  autoTable(doc, {
+    startY: ctrlY,
+    head: [[t("controlsTitle"), t("readinessShort") + " %", t("ucaCount")]],
+    body: controls.map((c) => [
+      lang === "el" ? (CONTROLS_EN_TO_EL[c.name] || c.name) : c.name,
+      pct(c.readiness),
+      c.ucaCount,
+    ]),
+  });
+
+  // Constraints
+  const consY = (doc.lastAutoTable?.finalY ?? ctrlY) + 8;
+  autoTable(doc, {
+    startY: consY,
+    head: [[t("constraintsTitle"), "Critical", "Status"]],
+    body: constraints.map((s) => [s.statement, s.critical ? "yes" : "no", s.status]),
+  });
+
+  // Incidents
+  const incY = (doc.lastAutoTable?.finalY ?? consY) + 8;
+  autoTable(doc, {
+    startY: incY,
+    head: [[t("incidentLogTitle"), "Linked hazard", "Time"]],
+    body: incidents.map((x) => [x.type, x.hazardId, new Date(x.ts).toLocaleString()]),
+  });
+
+  doc.save(`race-safety-health-${templateLabel}.pdf`);
+}
+
+// -----------------------------
+// Main App Component
 // -----------------------------
 function RaceSafetyMVP() {
-  const persisted = loadLS();
+  const saved = typeof window !== "undefined" ? loadLS() : null;
 
-  const [lang, setLang] = useState(persisted?.lang || "en");
-  const t = (key) => I18N[lang][key] ?? key;
+  const [lang, setLang] = useState(saved?.lang || "en");
+  const t = (k, ...args) => {
+    const v = I18N[lang][k];
+    return typeof v === "function" ? v(...args) : v ?? k;
+  };
 
-  const [templateKey, setTemplateKey] = useState(persisted?.templateKey || "roadShort");
+  const [templateKey, setTemplateKey] = useState(saved?.templateKey || "roadShort");
   const template = TEMPLATES[templateKey];
 
-  const [role, setRole] = useState(persisted?.role || "Race Director");
+  const [role, setRole] = useState(saved?.role || "Race Director");
+  const [selectedSegment, setSelectedSegment] = useState(saved?.selectedSegment || null);
+  const [selectedDomain, setSelectedDomain] = useState(saved?.selectedDomain || null);
 
-  const [hazards, setHazards] = useState(persisted?.hazards || template.hazards);
-  const [controls, setControls] = useState(persisted?.controls || INITIAL_CONTROLS);
-  const [constraints, setConstraints] = useState(persisted?.constraints || template.constraints);
-  const [segments, setSegments] = useState(persisted?.segments || template.segments);
-  const [readinessByDomain, setReadinessByDomain] = useState(persisted?.readinessByDomain || INITIAL_READINESS);
+  const [hazards, setHazards] = useState(saved?.hazards || template.hazards);
+  const [controls, setControls] = useState(saved?.controls || INITIAL_CONTROLS);
+  const [constraints, setConstraints] = useState(saved?.constraints || template.constraints);
 
-  const [segmentFilter, setSegmentFilter] = useState(persisted?.segmentFilter || null);
-  const [domainFilter, setDomainFilter] = useState(persisted?.domainFilter || null);
+  // criteria values per domain {domain: {criterionId: 0..1}}
+  const [criteriaValues, setCriteriaValues] = useState(saved?.criteriaValues || {});
+  const readiness = useMemo(
+    () => readinessFromCriteria(READINESS_CRITERIA, criteriaValues),
+    [criteriaValues]
+  );
 
-  const [notesByHazard, setNotesByHazard] = useState(persisted?.notesByHazard || {});
-  const [incidents, setIncidents] = useState(persisted?.incidents || []);
+  const [incidents, setIncidents] = useState(saved?.incidents || []);
+  const [incidentType, setIncidentType] = useState("Heat illness");
+  const [incidentHazardId, setIncidentHazardId] = useState(template.hazards[0]?.id || "");
 
-  // when template changes, reset data to template defaults
+  // when template changes, reset to template defaults
   useEffect(() => {
-    const tpl = TEMPLATES[templateKey];
-    setHazards(tpl.hazards);
-    setConstraints(tpl.constraints);
-    setSegments(tpl.segments);
-    setSegmentFilter(null);
-    setDomainFilter(null);
-  }, [templateKey]);
+    setHazards(template.hazards);
+    setConstraints(template.constraints);
+    setSelectedSegment(null);
+    setSelectedDomain(null);
+  }, [templateKey]); // eslint-disable-line
 
   // persist
   useEffect(() => {
     saveLS({
-      lang,
-      templateKey,
-      role,
-      hazards,
-      controls,
-      constraints,
-      segments,
-      segmentFilter,
-      domainFilter,
-      readinessByDomain,
-      notesByHazard,
-      incidents,
+      lang, templateKey, role, selectedSegment, selectedDomain,
+      hazards, controls, constraints, criteriaValues, incidents,
     });
-  }, [
-    lang,
-    templateKey,
-    role,
-    hazards,
-    controls,
-    constraints,
-    segments,
-    segmentFilter,
-    domainFilter,
-    readinessByDomain,
-    notesByHazard,
-    incidents,
-  ]);
+  }, [lang, templateKey, role, selectedSegment, selectedDomain, hazards, controls, constraints, criteriaValues, incidents]);
 
-  // role visibility
+  // role filtering
   const visibleDomains = ROLE_DOMAINS[role] || DOMAINS;
-  const visibleControls = ROLE_CONTROLS[role]; // null = all, [] = none
+  const visibleControls = ROLE_CONTROLS[role];
+  const filteredControls = visibleControls == null ? controls : controls.filter((c) => visibleControls.includes(c.name));
 
-  const hazardsFiltered = useMemo(() => {
-    return hazards.filter((h) => {
-      if (domainFilter && h.domain !== domainFilter) return false;
-      if (segmentFilter && h.segmentId !== segmentFilter && h.segmentId !== "SEG-ALL") return false;
-      if (!visibleDomains.includes(h.domain)) return false;
-      return true;
-    });
-  }, [hazards, domainFilter, segmentFilter, visibleDomains]);
+  // segment + domain filtering hazards
+  const filteredHazards = hazards.filter((h) => {
+    if (selectedSegment && h.segmentId !== selectedSegment) return false;
+    if (selectedDomain && h.domain !== selectedDomain) return false;
+    if (!visibleDomains.includes(h.domain)) return false;
+    return true;
+  });
 
-  const controlsFiltered = useMemo(() => {
-    if (visibleControls == null) return controls;
-    return controls.filter((c) => visibleControls.includes(c.name));
-  }, [controls, visibleControls]);
+  // scoring
+  const riskByDomain = DOMAINS.reduce((acc, d) => {
+    acc[d] = normalizeRiskToPct(domainRiskScore(hazards, d));
+    return acc;
+  }, {});
+  const riskLoadPct = clamp(avg(Object.values(riskByDomain)), 0, 100);
+  const controlPct = controlHealthPct(filteredControls);
+  const readinessPct = pct(avg(Object.values(readiness)));
 
-  // scores
-  const riskLoad = useMemo(() => calcRiskLoad(hazardsFiltered), [hazardsFiltered]);
-  const controlsHealth = useMemo(() => calcControlsHealth(controlsFiltered), [controlsFiltered]);
-  const readinessScore = useMemo(
-    () => calcReadinessScore(readinessByDomain, visibleDomains),
-    [readinessByDomain, visibleDomains]
+  const anyCriticalFail = constraints.some((c) => c.critical && c.status === "fail");
+
+  const holisticPct = clamp(
+    // weight: readiness 40%, controls 30%, risk inverted 30%
+    (readinessPct * 0.4) + (controlPct * 0.3) + ((100 - riskLoadPct) * 0.3),
+    0, 100
   );
 
-  const holistic = useMemo(
-    () => calcHolisticHealth({ riskLoad, controlsHealth, readinessScore }),
-    [riskLoad, controlsHealth, readinessScore]
-  );
-
-  const lockedRed = anyCriticalConstraintFail(constraints);
-
-  const prevHolistic = persisted?.prevHolistic ?? null;
-  useEffect(() => {
-    // store last holistic for trend
-    saveLS({ ...(loadLS() || {}), prevHolistic: holistic });
-  }, [holistic]);
-
-  // helpers
-  const domainLabel = (d) => (lang === "el" ? DOMAINS_EL[DOMAINS_EN.indexOf(d)] || d : d);
-  const roleLabel = (r) => (lang === "el" ? ROLES_EL[ROLES_EN.indexOf(r)] || r : r);
-  const controlLabel = (cname) => (lang === "el" ? CONTROLS_EN_TO_EL[cname] || cname : cname);
-
-  const segmentLabel = (sid) => segments.find((s) => s.id === sid)?.name || sid;
-
-  // update hazard fields
-  const updateHazard = (id, patch) => {
-    setHazards((hs) => hs.map((h) => (h.id === id ? { ...h, ...patch } : h)));
-  };
-
-  // incident logging
-  const incidentTypesEn = Object.keys(INCIDENTS_EN_TO_EL);
-  const [incidentType, setIncidentType] = useState(incidentTypesEn[0]);
-  const [incidentHazardId, setIncidentHazardId] = useState(hazards[0]?.id || "");
-  const [incidentNotes, setIncidentNotes] = useState("");
-
+  // incident → increase occurrence
   const logIncident = () => {
     if (!incidentHazardId) return;
-    const ts = new Date().toISOString();
-    const incident = {
-      id: `I-${ts}`,
-      type: incidentType,
-      hazardId: incidentHazardId,
-      notes: incidentNotes.trim(),
-      ts,
-    };
-    setIncidents((xs) => [incident, ...xs].slice(0, 50));
-
-    // increase occurrence (O) for linked hazard by 1 up to 10
-    setHazards((hs) =>
-      hs.map((h) =>
-        h.id === incidentHazardId ? { ...h, O: clamp((h.O || 1) + 1, 1, 10) } : h
+    setIncidents((prev) => [{ type: incidentType, hazardId: incidentHazardId, ts: Date.now() }, ...prev].slice(0, 20));
+    setHazards((prev) =>
+      prev.map((h) =>
+        h.id === incidentHazardId ? { ...h, O: clamp(h.O + 1, 1, 10) } : h
       )
     );
-
-    setIncidentNotes("");
   };
 
-  // PDF export
-  const exportPdf = () => {
-    const doc = new jsPDF();
+  const clearFilters = () => { setSelectedSegment(null); setSelectedDomain(null); };
 
-    doc.setFontSize(16);
-    doc.text(`${I18N[lang].appTitle} — ${template.label}`, 14, 16);
-    doc.setFontSize(10);
-    doc.text(`${I18N[lang].subtitle}`, 14, 22);
-    doc.text(`Role: ${roleLabel(role)}`, 14, 28);
-    doc.text(`Holistic Health: ${Math.round(holistic)}%`, 14, 34);
+  // small helpers for UI
+  const domainLabel = (d) => (lang === "el" ? DOMAINS_EL[DOMAINS_EN.indexOf(d)] || d : d);
+  const roleLabel = (r) => (lang === "el" ? ROLES_EL[ROLES_EN.indexOf(r)] || r : r);
+  const controlLabel = (c) => (lang === "el" ? (CONTROLS_EN_TO_EL[c] || c) : c);
 
-    // Constraints
-    doc.setFontSize(12);
-    doc.text(I18N[lang].constraintsTitle, 14, 44);
-
-    autoTable(doc, {
-      startY: 48,
-      head: [[
-        "ID",
-        lang === "el" ? "Περιορισμός" : "Constraint",
-        lang === "el" ? "Κρίσιμο" : "Critical",
-        lang === "el" ? "Κατάσταση" : "Status"
-      ]],
-      body: constraints.map((c) => [
-        c.id,
-        c.statement,
-        c.critical ? "YES" : "NO",
-        lang === "el" ? I18N.el[c.status] : c.status,
-      ]),
-      styles: { fontSize: 8 },
-    });
-
-    // Hazards
-    const yAfterConstraints = doc.lastAutoTable.finalY + 8;
-    doc.setFontSize(12);
-    doc.text(I18N[lang].hazardsTitle, 14, yAfterConstraints);
-
-    autoTable(doc, {
-      startY: yAfterConstraints + 4,
-      head: [[
-        "ID",
-        I18N[lang].domain,
-        I18N[lang].hazard,
-        I18N[lang].segment,
-        "S",
-        "O",
-        "D",
-        I18N[lang].controlsActive,
-        I18N[lang].residualRpn
-      ]],
-      body: hazardsFiltered.map((h) => [
-        h.id,
-        domainLabel(h.domain),
-        h.name,
-        segmentLabel(h.segmentId),
-        h.S,
-        h.O,
-        h.D,
-        Math.round((h.controlsActive ?? 0) * 100) + "%",
-        Math.round(calcHazardResidualRPN(h)),
-      ]),
-      styles: { fontSize: 7 },
-    });
-
-    doc.save("race-safety-mvp.pdf");
+  const setCriterionValue = (domain, critId, val01) => {
+    setCriteriaValues((prev) => ({
+      ...prev,
+      [domain]: { ...(prev[domain] || {}), [critId]: val01 },
+    }));
   };
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
-      {/* Header */}
-      <header className="sticky top-0 z-10 bg-white/90 backdrop-blur border-b border-slate-200">
+      <header className="sticky top-0 bg-white/90 backdrop-blur border-b border-slate-200 z-10">
         <div className="max-w-6xl mx-auto px-4 py-3 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
           <div>
-            <h1 className="text-xl md:text-2xl font-bold tracking-tight">
-              {t("appTitle")}
-            </h1>
-            <p className="text-xs md:text-sm text-slate-500">{t("subtitle")}</p>
+            <h1 className="text-2xl font-bold tracking-tight">{t("appTitle")}</h1>
+            <div className="text-sm text-slate-500">{t("subtitle")}</div>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
             {/* Language */}
-            <div className="flex rounded-xl border border-slate-200 overflow-hidden">
-              {LANGS.map((l) => (
+            <div className="flex rounded-full border border-slate-200 overflow-hidden">
+              {LANGS.map((L) => (
                 <button
-                  key={l.code}
-                  onClick={() => setLang(l.code)}
-                  className={`px-3 py-1 text-sm font-semibold ${
-                    lang === l.code ? "bg-slate-900 text-white" : "bg-white text-slate-700"
-                  }`}
+                  key={L.code}
+                  onClick={() => setLang(L.code)}
+                  className={`px-3 py-1 text-sm font-semibold ${lang === L.code ? "bg-slate-900 text-white" : "bg-white text-slate-700"}`}
                 >
-                  {l.label}
+                  {L.label}
                 </button>
               ))}
             </div>
@@ -779,13 +779,11 @@ function RaceSafetyMVP() {
             <select
               value={templateKey}
               onChange={(e) => setTemplateKey(e.target.value)}
-              className="px-3 py-2 rounded-xl border border-slate-200 text-sm bg-white"
+              className="px-3 py-2 rounded-lg border border-slate-200 bg-white text-sm"
               title={t("template")}
             >
-              {Object.entries(TEMPLATES).map(([k, v]) => (
-                <option key={k} value={k}>
-                  {lang === "el" ? TEMPLATES_LABELS[k].el : v.label}
-                </option>
+              {Object.entries(TEMPLATES_LABELS).map(([k, lab]) => (
+                <option key={k} value={k}>{lab[lang]}</option>
               ))}
             </select>
 
@@ -793,31 +791,28 @@ function RaceSafetyMVP() {
             <select
               value={role}
               onChange={(e) => setRole(e.target.value)}
-              className="px-3 py-2 rounded-xl border border-slate-200 text-sm bg-white"
+              className="px-3 py-2 rounded-lg border border-slate-200 bg-white text-sm"
               title={t("roleView")}
             >
               {ROLES.map((r) => (
-                <option key={r} value={r}>
-                  {roleLabel(r)}
-                </option>
+                <option key={r} value={r}>{roleLabel(r)}</option>
               ))}
             </select>
 
-            {/* Clear filters */}
-            <button
-              onClick={() => {
-                setDomainFilter(null);
-                setSegmentFilter(null);
-              }}
-              className="px-3 py-2 rounded-xl border border-slate-200 text-sm bg-white hover:bg-slate-100"
-            >
+            <button onClick={clearFilters} className="px-3 py-2 rounded-lg border border-slate-200 bg-white text-sm">
               {t("clearFilters")}
             </button>
 
-            {/* Export */}
             <button
-              onClick={exportPdf}
-              className="px-3 py-2 rounded-xl bg-emerald-600 text-white text-sm font-semibold hover:bg-emerald-700"
+              onClick={() =>
+                exportPdf({
+                  t, lang,
+                  templateLabel: TEMPLATES_LABELS[templateKey][lang],
+                  roleLabel: roleLabel(role),
+                  hazards, controls: filteredControls, constraints, readiness, incidents,
+                })
+              }
+              className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold"
             >
               {t("exportPdf")}
             </button>
@@ -825,407 +820,344 @@ function RaceSafetyMVP() {
         </div>
       </header>
 
-      {/* Gauge */}
-      <section className="max-w-6xl mx-auto px-4 py-4">
-        <SafetyGauge
-          t={t}
-          value={holistic}
-          lockedRed={lockedRed}
-          label={t("gaugeLabel")}
-          prevValue={prevHolistic}
-        />
-
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-2">
-          <KpiCard title={t("riskLoad")} value={`${Math.round(riskLoad)}%`} hint={t("hazardsHint")} />
-          <KpiCard title={t("controlHealth")} value={`${Math.round(controlsHealth)}%`} hint={t("controlsHint")} />
-          <KpiCard title={t("readiness")} value={`${Math.round(readinessScore)}%`} hint={t("readinessHint")} />
-        </div>
-      </section>
-
-      {/* Segments */}
-      <section className="max-w-6xl mx-auto px-4 py-4">
-        <SectionHeader title={t("segmentsTitle")} hint={t("segmentsHint")} />
-        <div className="flex flex-wrap gap-2">
-          {segments.map((s) => (
-            <button
-              key={s.id}
-              onClick={() => setSegmentFilter((cur) => (cur === s.id ? null : s.id))}
-              className={`px-3 py-1.5 rounded-full text-sm border ${
-                segmentFilter === s.id
-                  ? "bg-slate-900 text-white border-slate-900"
-                  : "bg-white border-slate-200 text-slate-700"
-              }`}
-            >
-              {s.name}
-            </button>
-          ))}
-        </div>
-      </section>
-
-      {/* Domains + Readiness */}
-      <section className="max-w-6xl mx-auto px-4 py-4">
-        <SectionHeader title={t("readinessTitle")} hint={t("readinessHint")} />
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          {visibleDomains.map((d) => (
-            <div key={d} className="bg-white rounded-2xl border border-slate-200 p-3">
-              <div className="flex items-center justify-between mb-2">
-                <button
-                  onClick={() => setDomainFilter((cur) => (cur === d ? null : d))}
-                  className={`text-sm font-semibold px-2 py-1 rounded-lg ${
-                    domainFilter === d ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-800"
-                  }`}
-                  title={t("tapInspect")}
-                >
-                  {domainLabel(d)}
-                </button>
-                <div className="text-xs text-slate-500">
-                  {t("readinessShort")}: {Math.round((readinessByDomain[d] ?? 0) * 100)}%
-                </div>
-              </div>
-
-              <input
-                type="range"
-                min={0}
-                max={100}
-                value={Math.round((readinessByDomain[d] ?? 0.75) * 100)}
-                onChange={(e) =>
-                  setReadinessByDomain((rb) => ({
-                    ...rb,
-                    [d]: clamp(Number(e.target.value) / 100, 0, 1),
-                  }))
-                }
-                className="w-full"
-              />
-            </div>
-          ))}
-        </div>
-      </section>
-
-      {/* Hazards */}
-      <section className="max-w-6xl mx-auto px-4 py-4">
-        <SectionHeader title={t("hazardsTitle")} hint={t("hazardsHint")} />
-
-        <div className="grid grid-cols-1 gap-3">
-          {hazardsFiltered.map((h) => {
-            const residual = Math.round(calcHazardResidualRPN(h));
-            const base = h.S * h.O * h.D;
-            const residualPct = clamp((residual / base) * 100, 0, 100);
-
-            return (
-              <div key={h.id} className="bg-white rounded-2xl border border-slate-200 p-4">
-                <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
-                  <div>
-                    <div className="text-xs text-slate-500">
-                      {t("domain")}: {domainLabel(h.domain)} • {t("segment")}: {segmentLabel(h.segmentId)}
-                    </div>
-                    <div className="text-base font-semibold">
-                      {h.id} — {h.name}
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-2 text-xs">
-                    <Badge label={`RPN ${residual}`} tone={residual < 120 ? "green" : residual < 220 ? "amber" : "red"} />
-                    <Badge label={`${t("controlsActive")}: ${Math.round((h.controlsActive ?? 0) * 100)}%`} tone="slate" />
-                  </div>
-                </div>
-
-                {/* sliders */}
-                <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mt-3">
-                  <ScaleSlider
-                    label={t("s")}
-                    value={h.S}
-                    onChange={(v) => updateHazard(h.id, { S: v })}
-                  />
-                  <ScaleSlider
-                    label={t("o")}
-                    value={h.O}
-                    onChange={(v) => updateHazard(h.id, { O: v })}
-                  />
-                  <ScaleSlider
-                    label={t("d")}
-                    value={h.D}
-                    onChange={(v) => updateHazard(h.id, { D: v })}
-                  />
-                  <PercentSlider
-                    label={t("controlsActive")}
-                    value={Math.round((h.controlsActive ?? 0.7) * 100)}
-                    onChange={(v) => updateHazard(h.id, { controlsActive: v / 100 })}
-                  />
-                </div>
-
-                {/* residual bar */}
-                <div className="mt-3">
-                  <div className="text-xs text-slate-500 mb-1">
-                    {t("residualRpn")}: {residual} ({Math.round(residualPct)}% of base)
-                  </div>
-                  <div className="h-2 w-full bg-slate-100 rounded-full overflow-hidden">
-                    <div
-                      className={`h-2 ${
-                        residualPct < 35 ? "bg-emerald-500" : residualPct < 60 ? "bg-amber-400" : "bg-red-500"
-                      }`}
-                      style={{ width: `${residualPct}%` }}
-                    />
-                  </div>
-                </div>
-
-                {/* notes */}
-                <div className="mt-3">
-                  <textarea
-                    value={notesByHazard[h.id] || ""}
-                    onChange={(e) =>
-                      setNotesByHazard((nbh) => ({ ...nbh, [h.id]: e.target.value }))
-                    }
-                    rows={2}
-                    placeholder={t("notesPlaceholder")}
-                    className="w-full text-sm p-2 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-slate-300"
-                  />
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </section>
-
-      {/* Controls */}
-      <section className="max-w-6xl mx-auto px-4 py-4">
-        <SectionHeader title={t("controlsTitle")} hint={t("controlsHint")} />
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          {controlsFiltered.map((c) => {
-            const health = clamp(c.readiness - 0.1 * (c.ucaCount ?? 0), 0, 1);
-            return (
-              <div key={c.id} className="bg-white rounded-2xl border border-slate-200 p-4">
-                <div className="flex items-center justify-between">
-                  <div className="font-semibold">{controlLabel(c.name)}</div>
-                  <Badge
-                    label={`${Math.round(health * 100)}%`}
-                    tone={health >= 0.8 ? "green" : health >= 0.6 ? "amber" : "red"}
-                  />
-                </div>
-
-                <div className="mt-3 grid grid-cols-2 gap-3">
-                  <PercentSlider
-                    label={t("readinessShort")}
-                    value={Math.round((c.readiness ?? 0.7) * 100)}
-                    onChange={(v) =>
-                      setControls((cs) =>
-                        cs.map((x) => (x.id === c.id ? { ...x, readiness: v / 100 } : x))
-                      )
-                    }
-                  />
-
-                  <ScaleSlider
-                    label={t("ucaCount")}
-                    value={c.ucaCount ?? 0}
-                    min={0}
-                    max={5}
-                    onChange={(v) =>
-                      setControls((cs) =>
-                        cs.map((x) => (x.id === c.id ? { ...x, ucaCount: v } : x))
-                      )
-                    }
-                  />
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </section>
-
-      {/* Constraints */}
-      <section className="max-w-6xl mx-auto px-4 py-4">
-        <SectionHeader title={t("constraintsTitle")} hint={t("constraintsHint")} />
-
-        <div className="grid grid-cols-1 gap-3">
-          {constraints.map((c) => (
-            <div key={c.id} className="bg-white rounded-2xl border border-slate-200 p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
-              <div>
-                <div className="text-sm font-semibold">
-                  {c.id} — {c.statement}
-                </div>
-                {c.critical && (
-                  <div className="text-xs text-red-600 font-semibold mt-1">
-                    CRITICAL
-                  </div>
-                )}
-              </div>
-
-              <div className="flex items-center gap-2">
-                {["pass", "warn", "fail"].map((st) => (
-                  <button
-                    key={st}
-                    onClick={() =>
-                      setConstraints((cs) =>
-                        cs.map((x) => (x.id === c.id ? { ...x, status: st } : x))
-                      )
-                    }
-                    className={`px-3 py-1 rounded-full text-sm font-semibold border ${
-                      c.status === st
-                        ? st === "pass"
-                          ? "bg-emerald-600 text-white border-emerald-600"
-                          : st === "warn"
-                          ? "bg-amber-400 text-black border-amber-400"
-                          : "bg-red-600 text-white border-red-600"
-                        : "bg-white border-slate-200 text-slate-700"
-                    }`}
-                  >
-                    {lang === "el" ? I18N.el[st] : st}
-                  </button>
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
-      </section>
-
-      {/* Incidents */}
-      <section className="max-w-6xl mx-auto px-4 py-4">
-        <SectionHeader title={t("incidentLogTitle")} hint={t("incidentLogHint")} />
-
-        <div className="bg-white rounded-2xl border border-slate-200 p-4 grid grid-cols-1 md:grid-cols-4 gap-3">
-          <select
-            value={incidentType}
-            onChange={(e) => setIncidentType(e.target.value)}
-            className="px-3 py-2 rounded-xl border border-slate-200 text-sm bg-white"
-          >
-            {incidentTypesEn.map((it) => (
-              <option key={it} value={it}>
-                {lang === "el" ? INCIDENTS_EN_TO_EL[it] : it}
-              </option>
-            ))}
-          </select>
-
-          <select
-            value={incidentHazardId}
-            onChange={(e) => setIncidentHazardId(e.target.value)}
-            className="px-3 py-2 rounded-xl border border-slate-200 text-sm bg-white"
-          >
-            {hazards.map((h) => (
-              <option key={h.id} value={h.id}>
-                {h.id} — {h.name}
-              </option>
-            ))}
-          </select>
-
-          <input
-            value={incidentNotes}
-            onChange={(e) => setIncidentNotes(e.target.value)}
-            placeholder={t("notesPlaceholder")}
-            className="px-3 py-2 rounded-xl border border-slate-200 text-sm bg-white md:col-span-1"
+      <main className="max-w-6xl mx-auto px-4 py-6 space-y-8">
+        {/* Gauge + top cards */}
+        <section className="bg-white rounded-2xl shadow-sm border border-slate-200 p-4">
+          <SafetyGauge
+            t={t}
+            value={holisticPct}
+            prevValue={saved?.holisticPct ?? null}
+            lockedRed={anyCriticalFail}
+            label={t("gaugeLabel")}
           />
 
-          <button
-            onClick={logIncident}
-            className="px-3 py-2 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800"
-          >
-            {t("logIncident")}
-          </button>
-        </div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-2">
+            <div className="rounded-xl border border-slate-200 p-4">
+              <div className="text-sm font-semibold">{t("riskLoad")}</div>
+              <div className="text-2xl font-bold mt-1">{Math.round(riskLoadPct)}%</div>
+              <div className="text-xs text-slate-500">{t("hazardsHint")}</div>
+            </div>
+            <div className="rounded-xl border border-slate-200 p-4">
+              <div className="text-sm font-semibold">{t("controlHealth")}</div>
+              <div className="text-2xl font-bold mt-1">{Math.round(controlPct)}%</div>
+              <div className="text-xs text-slate-500">{t("controlsHint")}</div>
+            </div>
+            <div className="rounded-xl border border-slate-200 p-4">
+              <div className="text-sm font-semibold">{t("readiness")}</div>
+              <div className="text-2xl font-bold mt-1">{Math.round(readinessPct)}%</div>
+              <div className="text-xs text-slate-500">{t("readinessHint")}</div>
+            </div>
+          </div>
+        </section>
 
-        <div className="mt-3 bg-white rounded-2xl border border-slate-200 p-4">
-          <div className="text-sm font-semibold mb-2">{t("recentIncidents")}</div>
-          {incidents.length === 0 ? (
-            <div className="text-sm text-slate-500">{t("noIncidents")}</div>
-          ) : (
-            <ul className="space-y-2">
-              {incidents.map((i) => (
-                <li key={i.id} className="text-sm flex flex-col md:flex-row md:items-center md:justify-between gap-1 border-b last:border-b-0 pb-2">
-                  <div>
-                    <span className="font-semibold">
-                      {lang === "el" ? INCIDENTS_EN_TO_EL[i.type] : i.type}
-                    </span>{" "}
-                    → {i.hazardId} ({hazards.find((h) => h.id === i.hazardId)?.name})
-                    {i.notes ? <div className="text-xs text-slate-600 mt-0.5">📝 {i.notes}</div> : null}
+        {/* Segments */}
+        <section className="bg-white rounded-2xl shadow-sm border border-slate-200 p-4">
+          <div className="flex items-baseline justify-between">
+            <h3 className="text-lg font-semibold">{t("segmentsTitle")}</h3>
+            <div className="text-xs text-slate-500">{t("segmentsHint")}</div>
+          </div>
+          <div className="flex flex-wrap gap-2 mt-3">
+            {template.segments.map((s) => (
+              <button
+                key={s.id}
+                onClick={() => setSelectedSegment((prev) => (prev === s.id ? null : s.id))}
+                className={`px-3 py-1.5 rounded-full text-sm border ${
+                  selectedSegment === s.id ? "bg-slate-900 text-white border-slate-900" : "bg-white border-slate-200 text-slate-700"
+                }`}
+              >
+                {s.name}
+              </button>
+            ))}
+          </div>
+        </section>
+
+        {/* Domains + readiness sub-criteria */}
+        <section className="bg-white rounded-2xl shadow-sm border border-slate-200 p-4">
+          <div className="flex items-baseline justify-between">
+            <h3 className="text-lg font-semibold">{t("domainsTitle")}</h3>
+            <div className="text-xs text-slate-500">{t("domainsHint")}</div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
+            {visibleDomains.map((d) => {
+              const crits = READINESS_CRITERIA[d] || [];
+              const r01 = readiness[d] ?? 0.75;
+              return (
+                <div key={d} className="border border-slate-200 rounded-xl p-3">
+                  <div className="flex items-center justify-between">
+                    <button
+                      onClick={() => setSelectedDomain((prev) => (prev === d ? null : d))}
+                      className={`text-left font-semibold ${selectedDomain === d ? "text-emerald-700" : ""}`}
+                    >
+                      {domainLabel(d)}
+                    </button>
+                    <div className="text-sm font-bold">{pct(r01)}%</div>
                   </div>
-                  <div className="text-xs text-slate-500">
-                    {new Date(i.ts).toLocaleString()}
+
+                  {/* sub-criteria */}
+                  {crits.length > 0 && (
+                    <div className="mt-2 space-y-2">
+                      <div className="text-xs font-semibold text-slate-500">{t("subCriteria")}</div>
+                      {crits.map((c) => {
+                        const val = criteriaValues?.[d]?.[c.id];
+                        const val01 = typeof val === "number" ? val : 0.75;
+                        return (
+                          <div key={c.id} className="flex items-center gap-2">
+                            <div className="flex-1 text-sm">{lang === "el" ? c.el : c.en}</div>
+                            <input
+                              type="range"
+                              min={0}
+                              max={100}
+                              step={5}
+                              value={pct(val01)}
+                              onChange={(e) => setCriterionValue(d, c.id, e.target.value / 100)}
+                              className="w-40"
+                            />
+                            <div className="w-10 text-right text-sm tabular-nums">{pct(val01)}%</div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </section>
+
+        {/* Hazards FMEA */}
+        <section className="bg-white rounded-2xl shadow-sm border border-slate-200 p-4">
+          <div className="flex items-baseline justify-between">
+            <h3 className="text-lg font-semibold">{t("hazardsTitle")}</h3>
+            <div className="text-xs text-slate-500">{t("hazardsHint")}</div>
+          </div>
+
+          <div className="mt-3 space-y-3">
+            {filteredHazards.map((h) => {
+              const rpn = residualRpn(h);
+              return (
+                <div key={h.id} className="border border-slate-200 rounded-xl p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="font-semibold">{h.name}</div>
+                    <div className="text-xs text-slate-500">
+                      {domainLabel(h.domain)} • {h.segmentId}
+                    </div>
                   </div>
-                </li>
+
+                  <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mt-2">
+                    {["S", "O", "D"].map((k) => (
+                      <label key={k} className="text-sm">
+                        <div className="flex justify-between">
+                          <span>{t(k.toLowerCase())}</span>
+                          <span className="font-semibold">{h[k]}</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={1}
+                          max={10}
+                          step={1}
+                          value={h[k]}
+                          onChange={(e) =>
+                            setHazards((prev) =>
+                              prev.map((x) => (x.id === h.id ? { ...x, [k]: Number(e.target.value) } : x))
+                            )
+                          }
+                          className="w-full"
+                        />
+                      </label>
+                    ))}
+
+                    <label className="text-sm">
+                      <div className="flex justify-between">
+                        <span>{t("controlsActive")}</span>
+                        <span className="font-semibold">{pct(h.controlsActive)}%</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0}
+                        max={100}
+                        step={5}
+                        value={pct(h.controlsActive)}
+                        onChange={(e) =>
+                          setHazards((prev) =>
+                            prev.map((x) => (x.id === h.id ? { ...x, controlsActive: e.target.value / 100 } : x))
+                          )
+                        }
+                        className="w-full"
+                      />
+                    </label>
+                  </div>
+
+                  <div className="mt-2 flex items-center justify-between">
+                    <div className="text-sm text-slate-600">{t("residualRpn")}</div>
+                    <div className="text-lg font-bold tabular-nums">{Math.round(rpn)}</div>
+                  </div>
+                </div>
+              );
+            })}
+
+            {!filteredHazards.length && (
+              <div className="text-sm text-slate-500">{t("tapInspect")}</div>
+            )}
+          </div>
+        </section>
+
+        {/* Controls STPA */}
+        <section className="bg-white rounded-2xl shadow-sm border border-slate-200 p-4">
+          <div className="flex items-baseline justify-between">
+            <h3 className="text-lg font-semibold">{t("controlsTitle")}</h3>
+            <div className="text-xs text-slate-500">{t("controlsHint")}</div>
+          </div>
+
+          <div className="mt-3 space-y-3">
+            {filteredControls.map((c) => (
+              <div key={c.id} className="border border-slate-200 rounded-xl p-3">
+                <div className="flex items-center justify-between">
+                  <div className="font-semibold">{controlLabel(c.name)}</div>
+                  <div className="text-sm font-bold">{pct(c.readiness)}%</div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-2">
+                  <label className="text-sm">
+                    <div className="flex justify-between">
+                      <span>{t("readinessShort")}</span>
+                      <span className="font-semibold">{pct(c.readiness)}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      step={5}
+                      value={pct(c.readiness)}
+                      onChange={(e) =>
+                        setControls((prev) =>
+                          prev.map((x) => (x.id === c.id ? { ...x, readiness: e.target.value / 100 } : x))
+                        )
+                      }
+                      className="w-full"
+                    />
+                  </label>
+
+                  <label className="text-sm">
+                    <div className="flex justify-between">
+                      <span>{t("ucaCount")}</span>
+                      <span className="font-semibold">{c.ucaCount}</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={5}
+                      step={1}
+                      value={c.ucaCount}
+                      onChange={(e) =>
+                        setControls((prev) =>
+                          prev.map((x) => (x.id === c.id ? { ...x, ucaCount: Number(e.target.value) } : x))
+                        )
+                      }
+                      className="w-full"
+                    />
+                  </label>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        {/* Constraints STAMP */}
+        <section className="bg-white rounded-2xl shadow-sm border border-slate-200 p-4">
+          <div className="flex items-baseline justify-between">
+            <h3 className="text-lg font-semibold">{t("constraintsTitle")}</h3>
+            <div className="text-xs text-slate-500">{t("constraintsHint")}</div>
+          </div>
+
+          <div className="mt-3 space-y-2">
+            {constraints.map((s) => (
+              <div key={s.id} className="border border-slate-200 rounded-xl p-3 flex items-center justify-between gap-2">
+                <div>
+                  <div className="font-medium">{s.statement}</div>
+                  {s.critical && <div className="text-xs text-red-600 font-semibold">CRITICAL</div>}
+                </div>
+                <select
+                  value={s.status}
+                  onChange={(e) =>
+                    setConstraints((prev) =>
+                      prev.map((x) => (x.id === s.id ? { ...x, status: e.target.value } : x))
+                    )
+                  }
+                  className={`px-2 py-1 rounded-lg border text-sm ${
+                    s.status === "pass" ? "border-emerald-300 bg-emerald-50" :
+                    s.status === "warn" ? "border-amber-300 bg-amber-50" :
+                    "border-red-300 bg-red-50"
+                  }`}
+                >
+                  <option value="pass">{t("pass")}</option>
+                  <option value="warn">{t("warn")}</option>
+                  <option value="fail">{t("fail")}</option>
+                </select>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        {/* Incident Log */}
+        <section className="bg-white rounded-2xl shadow-sm border border-slate-200 p-4">
+          <div className="flex items-baseline justify-between">
+            <h3 className="text-lg font-semibold">{t("incidentLogTitle")}</h3>
+            <div className="text-xs text-slate-500">{t("incidentLogHint")}</div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mt-3">
+            <select
+              value={incidentType}
+              onChange={(e) => setIncidentType(e.target.value)}
+              className="px-3 py-2 rounded-lg border border-slate-200 bg-white text-sm"
+            >
+              {Object.keys(INCIDENTS_EN_TO_EL).map((k) => (
+                <option key={k} value={k}>{lang === "el" ? INCIDENTS_EN_TO_EL[k] : k}</option>
               ))}
-            </ul>
-          )}
-        </div>
-      </section>
+            </select>
 
-      {/* Footer */}
-      <footer className="max-w-6xl mx-auto px-4 py-8 text-xs text-slate-500">
-        {t("mvpFooter")}
-      </footer>
-    </div>
-  );
-}
+            <select
+              value={incidentHazardId}
+              onChange={(e) => setIncidentHazardId(e.target.value)}
+              className="px-3 py-2 rounded-lg border border-slate-200 bg-white text-sm"
+            >
+              {hazards.map((h) => (
+                <option key={h.id} value={h.id}>{h.name}</option>
+              ))}
+            </select>
 
-// -----------------------------
-// Small UI helpers
-// -----------------------------
-function SectionHeader({ title, hint }) {
-  return (
-    <div className="mb-2">
-      <h3 className="text-lg font-semibold">{title}</h3>
-      {hint && <div className="text-xs text-slate-500">{hint}</div>}
-    </div>
-  );
-}
+            <button
+              onClick={logIncident}
+              className="px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-sm font-semibold"
+            >
+              {t("logIncident")}
+            </button>
+          </div>
 
-function KpiCard({ title, value, hint }) {
-  return (
-    <div className="bg-white rounded-2xl border border-slate-200 p-4">
-      <div className="text-sm font-semibold">{title}</div>
-      <div className="text-2xl font-bold mt-1">{value}</div>
-      {hint && <div className="text-xs text-slate-500 mt-1">{hint}</div>}
-    </div>
-  );
-}
+          <div className="mt-4">
+            <div className="text-sm font-semibold">{t("recentIncidents")}</div>
+            <div className="text-xs text-slate-500">{t("recentIncidentsHint")}</div>
 
-function Badge({ label, tone = "slate" }) {
-  const tones = {
-    green: "bg-emerald-100 text-emerald-800 border-emerald-200",
-    amber: "bg-amber-100 text-amber-900 border-amber-200",
-    red: "bg-red-100 text-red-800 border-red-200",
-    slate: "bg-slate-100 text-slate-800 border-slate-200",
-  };
-  return (
-    <span className={`px-2 py-0.5 rounded-full text-xs font-semibold border ${tones[tone] || tones.slate}`}>
-      {label}
-    </span>
-  );
-}
+            <div className="mt-2 space-y-2">
+              {incidents.length === 0 && <div className="text-sm text-slate-500">{t("noIncidents")}</div>}
+              {incidents.map((x, i) => (
+                <div key={i} className="border border-slate-200 rounded-xl p-2 text-sm flex items-center justify-between">
+                  <div>
+                    {lang === "el" ? (INCIDENTS_EN_TO_EL[x.type] || x.type) : x.type}
+                    <span className="text-slate-400"> — {hazards.find((h) => h.id === x.hazardId)?.name || x.hazardId}</span>
+                  </div>
+                  <div className="text-xs text-slate-500">{new Date(x.ts).toLocaleString()}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
 
-function ScaleSlider({ label, value, onChange, min = 1, max = 10 }) {
-  return (
-    <div className="bg-slate-50 rounded-xl p-2 border border-slate-200">
-      <div className="flex items-center justify-between text-xs">
-        <span className="font-semibold">{label}</span>
-        <span className="text-slate-600">{value}</span>
-      </div>
-      <input
-        type="range"
-        min={min}
-        max={max}
-        value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
-        className="w-full mt-1"
-      />
-    </div>
-  );
-}
-
-function PercentSlider({ label, value, onChange }) {
-  return (
-    <div className="bg-slate-50 rounded-xl p-2 border border-slate-200">
-      <div className="flex items-center justify-between text-xs">
-        <span className="font-semibold">{label}</span>
-        <span className="text-slate-600">{value}%</span>
-      </div>
-      <input
-        type="range"
-        min={0}
-        max={100}
-        value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
-        className="w-full mt-1"
-      />
+        <footer className="text-center text-xs text-slate-500 py-4">
+          {t("mvpFooter")}
+        </footer>
+      </main>
     </div>
   );
 }
