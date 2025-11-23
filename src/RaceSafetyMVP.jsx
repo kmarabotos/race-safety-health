@@ -1,14 +1,25 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useState, useEffect } from "react";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 
 /**
- * Race Safety Health Web MVP v4
- * Adds bilingual language switcher (EN/GR) without external i18n library.
- * Keeps v3 features (A/B/C/D): roles, PDF export, persistence, segments.
+ * Race Safety Health Web MVP v4 (full working component)
+ * EMBOK × FMEA × STPA/STAMP
+ * Features:
+ * - Bilingual EN/GR toggle (simple i18n)
+ * - Templates (roadShort / roadMarathon / trailUltra)
+ * - Roles view (domains + controls visibility)
+ * - Hazards with FMEA residual RPN
+ * - Controls health with UCA penalties
+ * - Critical constraints gate (STAMP)
+ * - Readiness sliders per domain (EMBOK)
+ * - Course segments (zones) filter
+ * - Incident quick log that increases Occurrence (O)
+ * - LocalStorage persistence
+ * - PDF export
  *
- * Drop into a Vite/Next React project. Tailwind assumed.
- * npm: jspdf jspdf-autotable
+ * Tailwind assumed.
+ * npm i jspdf jspdf-autotable
  */
 
 // -----------------------------
@@ -353,13 +364,9 @@ function SafetyGauge({ t, value = 0, lockedRed = false, label, prevValue = null 
 }
 
 // -----------------------------
-// Domains (canonical EN keys)
+// Domains / Roles / Visibility
 // -----------------------------
 const DOMAINS = DOMAINS_EN;
-
-// -----------------------------
-// Roles and visibility (canonical EN keys)
-// -----------------------------
 const ROLES = ROLES_EN;
 
 const ROLE_DOMAINS = {
@@ -389,7 +396,7 @@ const ROLE_CONTROLS = {
 };
 
 // -----------------------------
-// Race templates (canonical EN hazard/control/constraint keys)
+// Templates
 // -----------------------------
 const TEMPLATES = {
   roadShort: {
@@ -415,6 +422,7 @@ const TEMPLATES = {
       { id: "SEG-ALL", name: "Whole course" },
     ],
   },
+
   roadMarathon: {
     label: TEMPLATES_LABELS.roadMarathon.en,
     hazards: [
@@ -441,6 +449,7 @@ const TEMPLATES = {
       { id: "SEG-ALL", name: "Whole course" },
     ],
   },
+
   trailUltra: {
     label: TEMPLATES_LABELS.trailUltra.en,
     hazards: [
@@ -485,12 +494,740 @@ const INITIAL_READINESS = DOMAINS.reduce((acc, d) => {
 // -----------------------------
 // Scoring Engine
 // -----------------------------
-// (rest identical to above; already included)
-// -----------------------------
+function calcHazardResidualRPN(h) {
+  // base RPN = S*O*D, reduced by controlsActive (0..1)
+  const base = h.S * h.O * h.D;
+  const reduction = clamp(h.controlsActive ?? 0.7, 0, 1);
+  const residual = base * (1 - reduction);
+  return residual;
+}
+
+function calcRiskLoad(hazards) {
+  // Weighted normalized risk (0..100)
+  if (!hazards.length) return 0;
+  const weightedResiduals = hazards.map((h) => calcHazardResidualRPN(h) * (h.weight ?? 1));
+  // Rough max per hazard (10*10*10=1000) then after controls ~1000
+  const maxPerHazard = 1000;
+  const maxTotal = maxPerHazard * hazards.length;
+  const ratio = sum(weightedResiduals) / maxTotal;
+  // translate to "health": high risk -> low health
+  return clamp((1 - ratio) * 100, 0, 100);
+}
+
+function calcControlsHealth(controls) {
+  if (!controls.length) return 0;
+  const penalties = controls.map((c) => clamp(c.readiness - 0.1 * (c.ucaCount ?? 0), 0, 1));
+  return clamp(avg(penalties) * 100, 0, 100);
+}
+
+function calcReadinessScore(readinessByDomain, visibleDomains) {
+  const vals = visibleDomains.map((d) => readinessByDomain[d] ?? 0.75);
+  return clamp(avg(vals) * 100, 0, 100);
+}
+
+function calcHolisticHealth({ riskLoad, controlsHealth, readinessScore }) {
+  // simple balanced average
+  return clamp(avg([riskLoad, controlsHealth, readinessScore]), 0, 100);
+}
+
+function anyCriticalConstraintFail(constraints) {
+  return constraints.some((c) => c.critical && c.status === "fail");
+}
 
 // -----------------------------
-// Main App
+// Main Component
 // -----------------------------
-// (rest identical to above; already included)
+function RaceSafetyMVP() {
+  const persisted = loadLS();
+
+  const [lang, setLang] = useState(persisted?.lang || "en");
+  const t = (key) => I18N[lang][key] ?? key;
+
+  const [templateKey, setTemplateKey] = useState(persisted?.templateKey || "roadShort");
+  const template = TEMPLATES[templateKey];
+
+  const [role, setRole] = useState(persisted?.role || "Race Director");
+
+  const [hazards, setHazards] = useState(persisted?.hazards || template.hazards);
+  const [controls, setControls] = useState(persisted?.controls || INITIAL_CONTROLS);
+  const [constraints, setConstraints] = useState(persisted?.constraints || template.constraints);
+  const [segments, setSegments] = useState(persisted?.segments || template.segments);
+  const [readinessByDomain, setReadinessByDomain] = useState(persisted?.readinessByDomain || INITIAL_READINESS);
+
+  const [segmentFilter, setSegmentFilter] = useState(persisted?.segmentFilter || null);
+  const [domainFilter, setDomainFilter] = useState(persisted?.domainFilter || null);
+
+  const [notesByHazard, setNotesByHazard] = useState(persisted?.notesByHazard || {});
+  const [incidents, setIncidents] = useState(persisted?.incidents || []);
+
+  // when template changes, reset data to template defaults
+  useEffect(() => {
+    const tpl = TEMPLATES[templateKey];
+    setHazards(tpl.hazards);
+    setConstraints(tpl.constraints);
+    setSegments(tpl.segments);
+    setSegmentFilter(null);
+    setDomainFilter(null);
+  }, [templateKey]);
+
+  // persist
+  useEffect(() => {
+    saveLS({
+      lang,
+      templateKey,
+      role,
+      hazards,
+      controls,
+      constraints,
+      segments,
+      segmentFilter,
+      domainFilter,
+      readinessByDomain,
+      notesByHazard,
+      incidents,
+    });
+  }, [
+    lang,
+    templateKey,
+    role,
+    hazards,
+    controls,
+    constraints,
+    segments,
+    segmentFilter,
+    domainFilter,
+    readinessByDomain,
+    notesByHazard,
+    incidents,
+  ]);
+
+  // role visibility
+  const visibleDomains = ROLE_DOMAINS[role] || DOMAINS;
+  const visibleControls = ROLE_CONTROLS[role]; // null = all, [] = none
+
+  const hazardsFiltered = useMemo(() => {
+    return hazards.filter((h) => {
+      if (domainFilter && h.domain !== domainFilter) return false;
+      if (segmentFilter && h.segmentId !== segmentFilter && h.segmentId !== "SEG-ALL") return false;
+      if (!visibleDomains.includes(h.domain)) return false;
+      return true;
+    });
+  }, [hazards, domainFilter, segmentFilter, visibleDomains]);
+
+  const controlsFiltered = useMemo(() => {
+    if (visibleControls == null) return controls;
+    return controls.filter((c) => visibleControls.includes(c.name));
+  }, [controls, visibleControls]);
+
+  // scores
+  const riskLoad = useMemo(() => calcRiskLoad(hazardsFiltered), [hazardsFiltered]);
+  const controlsHealth = useMemo(() => calcControlsHealth(controlsFiltered), [controlsFiltered]);
+  const readinessScore = useMemo(
+    () => calcReadinessScore(readinessByDomain, visibleDomains),
+    [readinessByDomain, visibleDomains]
+  );
+
+  const holistic = useMemo(
+    () => calcHolisticHealth({ riskLoad, controlsHealth, readinessScore }),
+    [riskLoad, controlsHealth, readinessScore]
+  );
+
+  const lockedRed = anyCriticalConstraintFail(constraints);
+
+  const prevHolistic = persisted?.prevHolistic ?? null;
+  useEffect(() => {
+    // store last holistic for trend
+    saveLS({ ...(loadLS() || {}), prevHolistic: holistic });
+  }, [holistic]);
+
+  // helpers
+  const domainLabel = (d) => (lang === "el" ? DOMAINS_EL[DOMAINS_EN.indexOf(d)] || d : d);
+  const roleLabel = (r) => (lang === "el" ? ROLES_EL[ROLES_EN.indexOf(r)] || r : r);
+  const controlLabel = (cname) => (lang === "el" ? CONTROLS_EN_TO_EL[cname] || cname : cname);
+
+  const segmentLabel = (sid) => segments.find((s) => s.id === sid)?.name || sid;
+
+  // update hazard fields
+  const updateHazard = (id, patch) => {
+    setHazards((hs) => hs.map((h) => (h.id === id ? { ...h, ...patch } : h)));
+  };
+
+  // incident logging
+  const incidentTypesEn = Object.keys(INCIDENTS_EN_TO_EL);
+  const [incidentType, setIncidentType] = useState(incidentTypesEn[0]);
+  const [incidentHazardId, setIncidentHazardId] = useState(hazards[0]?.id || "");
+  const [incidentNotes, setIncidentNotes] = useState("");
+
+  const logIncident = () => {
+    if (!incidentHazardId) return;
+    const ts = new Date().toISOString();
+    const incident = {
+      id: `I-${ts}`,
+      type: incidentType,
+      hazardId: incidentHazardId,
+      notes: incidentNotes.trim(),
+      ts,
+    };
+    setIncidents((xs) => [incident, ...xs].slice(0, 50));
+
+    // increase occurrence (O) for linked hazard by 1 up to 10
+    setHazards((hs) =>
+      hs.map((h) =>
+        h.id === incidentHazardId ? { ...h, O: clamp((h.O || 1) + 1, 1, 10) } : h
+      )
+    );
+
+    setIncidentNotes("");
+  };
+
+  // PDF export
+  const exportPdf = () => {
+    const doc = new jsPDF();
+
+    doc.setFontSize(16);
+    doc.text(`${I18N[lang].appTitle} — ${template.label}`, 14, 16);
+    doc.setFontSize(10);
+    doc.text(`${I18N[lang].subtitle}`, 14, 22);
+    doc.text(`Role: ${roleLabel(role)}`, 14, 28);
+    doc.text(`Holistic Health: ${Math.round(holistic)}%`, 14, 34);
+
+    // Constraints
+    doc.setFontSize(12);
+    doc.text(I18N[lang].constraintsTitle, 14, 44);
+
+    autoTable(doc, {
+      startY: 48,
+      head: [[
+        "ID",
+        lang === "el" ? "Περιορισμός" : "Constraint",
+        lang === "el" ? "Κρίσιμο" : "Critical",
+        lang === "el" ? "Κατάσταση" : "Status"
+      ]],
+      body: constraints.map((c) => [
+        c.id,
+        c.statement,
+        c.critical ? "YES" : "NO",
+        lang === "el" ? I18N.el[c.status] : c.status,
+      ]),
+      styles: { fontSize: 8 },
+    });
+
+    // Hazards
+    const yAfterConstraints = doc.lastAutoTable.finalY + 8;
+    doc.setFontSize(12);
+    doc.text(I18N[lang].hazardsTitle, 14, yAfterConstraints);
+
+    autoTable(doc, {
+      startY: yAfterConstraints + 4,
+      head: [[
+        "ID",
+        I18N[lang].domain,
+        I18N[lang].hazard,
+        I18N[lang].segment,
+        "S",
+        "O",
+        "D",
+        I18N[lang].controlsActive,
+        I18N[lang].residualRpn
+      ]],
+      body: hazardsFiltered.map((h) => [
+        h.id,
+        domainLabel(h.domain),
+        h.name,
+        segmentLabel(h.segmentId),
+        h.S,
+        h.O,
+        h.D,
+        Math.round((h.controlsActive ?? 0) * 100) + "%",
+        Math.round(calcHazardResidualRPN(h)),
+      ]),
+      styles: { fontSize: 7 },
+    });
+
+    doc.save("race-safety-mvp.pdf");
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-50 text-slate-900">
+      {/* Header */}
+      <header className="sticky top-0 z-10 bg-white/90 backdrop-blur border-b border-slate-200">
+        <div className="max-w-6xl mx-auto px-4 py-3 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+          <div>
+            <h1 className="text-xl md:text-2xl font-bold tracking-tight">
+              {t("appTitle")}
+            </h1>
+            <p className="text-xs md:text-sm text-slate-500">{t("subtitle")}</p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Language */}
+            <div className="flex rounded-xl border border-slate-200 overflow-hidden">
+              {LANGS.map((l) => (
+                <button
+                  key={l.code}
+                  onClick={() => setLang(l.code)}
+                  className={`px-3 py-1 text-sm font-semibold ${
+                    lang === l.code ? "bg-slate-900 text-white" : "bg-white text-slate-700"
+                  }`}
+                >
+                  {l.label}
+                </button>
+              ))}
+            </div>
+
+            {/* Template */}
+            <select
+              value={templateKey}
+              onChange={(e) => setTemplateKey(e.target.value)}
+              className="px-3 py-2 rounded-xl border border-slate-200 text-sm bg-white"
+              title={t("template")}
+            >
+              {Object.entries(TEMPLATES).map(([k, v]) => (
+                <option key={k} value={k}>
+                  {lang === "el" ? TEMPLATES_LABELS[k].el : v.label}
+                </option>
+              ))}
+            </select>
+
+            {/* Role */}
+            <select
+              value={role}
+              onChange={(e) => setRole(e.target.value)}
+              className="px-3 py-2 rounded-xl border border-slate-200 text-sm bg-white"
+              title={t("roleView")}
+            >
+              {ROLES.map((r) => (
+                <option key={r} value={r}>
+                  {roleLabel(r)}
+                </option>
+              ))}
+            </select>
+
+            {/* Clear filters */}
+            <button
+              onClick={() => {
+                setDomainFilter(null);
+                setSegmentFilter(null);
+              }}
+              className="px-3 py-2 rounded-xl border border-slate-200 text-sm bg-white hover:bg-slate-100"
+            >
+              {t("clearFilters")}
+            </button>
+
+            {/* Export */}
+            <button
+              onClick={exportPdf}
+              className="px-3 py-2 rounded-xl bg-emerald-600 text-white text-sm font-semibold hover:bg-emerald-700"
+            >
+              {t("exportPdf")}
+            </button>
+          </div>
+        </div>
+      </header>
+
+      {/* Gauge */}
+      <section className="max-w-6xl mx-auto px-4 py-4">
+        <SafetyGauge
+          t={t}
+          value={holistic}
+          lockedRed={lockedRed}
+          label={t("gaugeLabel")}
+          prevValue={prevHolistic}
+        />
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-2">
+          <KpiCard title={t("riskLoad")} value={`${Math.round(riskLoad)}%`} hint={t("hazardsHint")} />
+          <KpiCard title={t("controlHealth")} value={`${Math.round(controlsHealth)}%`} hint={t("controlsHint")} />
+          <KpiCard title={t("readiness")} value={`${Math.round(readinessScore)}%`} hint={t("readinessHint")} />
+        </div>
+      </section>
+
+      {/* Segments */}
+      <section className="max-w-6xl mx-auto px-4 py-4">
+        <SectionHeader title={t("segmentsTitle")} hint={t("segmentsHint")} />
+        <div className="flex flex-wrap gap-2">
+          {segments.map((s) => (
+            <button
+              key={s.id}
+              onClick={() => setSegmentFilter((cur) => (cur === s.id ? null : s.id))}
+              className={`px-3 py-1.5 rounded-full text-sm border ${
+                segmentFilter === s.id
+                  ? "bg-slate-900 text-white border-slate-900"
+                  : "bg-white border-slate-200 text-slate-700"
+              }`}
+            >
+              {s.name}
+            </button>
+          ))}
+        </div>
+      </section>
+
+      {/* Domains + Readiness */}
+      <section className="max-w-6xl mx-auto px-4 py-4">
+        <SectionHeader title={t("readinessTitle")} hint={t("readinessHint")} />
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {visibleDomains.map((d) => (
+            <div key={d} className="bg-white rounded-2xl border border-slate-200 p-3">
+              <div className="flex items-center justify-between mb-2">
+                <button
+                  onClick={() => setDomainFilter((cur) => (cur === d ? null : d))}
+                  className={`text-sm font-semibold px-2 py-1 rounded-lg ${
+                    domainFilter === d ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-800"
+                  }`}
+                  title={t("tapInspect")}
+                >
+                  {domainLabel(d)}
+                </button>
+                <div className="text-xs text-slate-500">
+                  {t("readinessShort")}: {Math.round((readinessByDomain[d] ?? 0) * 100)}%
+                </div>
+              </div>
+
+              <input
+                type="range"
+                min={0}
+                max={100}
+                value={Math.round((readinessByDomain[d] ?? 0.75) * 100)}
+                onChange={(e) =>
+                  setReadinessByDomain((rb) => ({
+                    ...rb,
+                    [d]: clamp(Number(e.target.value) / 100, 0, 1),
+                  }))
+                }
+                className="w-full"
+              />
+            </div>
+          ))}
+        </div>
+      </section>
+
+      {/* Hazards */}
+      <section className="max-w-6xl mx-auto px-4 py-4">
+        <SectionHeader title={t("hazardsTitle")} hint={t("hazardsHint")} />
+
+        <div className="grid grid-cols-1 gap-3">
+          {hazardsFiltered.map((h) => {
+            const residual = Math.round(calcHazardResidualRPN(h));
+            const base = h.S * h.O * h.D;
+            const residualPct = clamp((residual / base) * 100, 0, 100);
+
+            return (
+              <div key={h.id} className="bg-white rounded-2xl border border-slate-200 p-4">
+                <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
+                  <div>
+                    <div className="text-xs text-slate-500">
+                      {t("domain")}: {domainLabel(h.domain)} • {t("segment")}: {segmentLabel(h.segmentId)}
+                    </div>
+                    <div className="text-base font-semibold">
+                      {h.id} — {h.name}
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 text-xs">
+                    <Badge label={`RPN ${residual}`} tone={residual < 120 ? "green" : residual < 220 ? "amber" : "red"} />
+                    <Badge label={`${t("controlsActive")}: ${Math.round((h.controlsActive ?? 0) * 100)}%`} tone="slate" />
+                  </div>
+                </div>
+
+                {/* sliders */}
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mt-3">
+                  <ScaleSlider
+                    label={t("s")}
+                    value={h.S}
+                    onChange={(v) => updateHazard(h.id, { S: v })}
+                  />
+                  <ScaleSlider
+                    label={t("o")}
+                    value={h.O}
+                    onChange={(v) => updateHazard(h.id, { O: v })}
+                  />
+                  <ScaleSlider
+                    label={t("d")}
+                    value={h.D}
+                    onChange={(v) => updateHazard(h.id, { D: v })}
+                  />
+                  <PercentSlider
+                    label={t("controlsActive")}
+                    value={Math.round((h.controlsActive ?? 0.7) * 100)}
+                    onChange={(v) => updateHazard(h.id, { controlsActive: v / 100 })}
+                  />
+                </div>
+
+                {/* residual bar */}
+                <div className="mt-3">
+                  <div className="text-xs text-slate-500 mb-1">
+                    {t("residualRpn")}: {residual} ({Math.round(residualPct)}% of base)
+                  </div>
+                  <div className="h-2 w-full bg-slate-100 rounded-full overflow-hidden">
+                    <div
+                      className={`h-2 ${
+                        residualPct < 35 ? "bg-emerald-500" : residualPct < 60 ? "bg-amber-400" : "bg-red-500"
+                      }`}
+                      style={{ width: `${residualPct}%` }}
+                    />
+                  </div>
+                </div>
+
+                {/* notes */}
+                <div className="mt-3">
+                  <textarea
+                    value={notesByHazard[h.id] || ""}
+                    onChange={(e) =>
+                      setNotesByHazard((nbh) => ({ ...nbh, [h.id]: e.target.value }))
+                    }
+                    rows={2}
+                    placeholder={t("notesPlaceholder")}
+                    className="w-full text-sm p-2 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-slate-300"
+                  />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </section>
+
+      {/* Controls */}
+      <section className="max-w-6xl mx-auto px-4 py-4">
+        <SectionHeader title={t("controlsTitle")} hint={t("controlsHint")} />
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {controlsFiltered.map((c) => {
+            const health = clamp(c.readiness - 0.1 * (c.ucaCount ?? 0), 0, 1);
+            return (
+              <div key={c.id} className="bg-white rounded-2xl border border-slate-200 p-4">
+                <div className="flex items-center justify-between">
+                  <div className="font-semibold">{controlLabel(c.name)}</div>
+                  <Badge
+                    label={`${Math.round(health * 100)}%`}
+                    tone={health >= 0.8 ? "green" : health >= 0.6 ? "amber" : "red"}
+                  />
+                </div>
+
+                <div className="mt-3 grid grid-cols-2 gap-3">
+                  <PercentSlider
+                    label={t("readinessShort")}
+                    value={Math.round((c.readiness ?? 0.7) * 100)}
+                    onChange={(v) =>
+                      setControls((cs) =>
+                        cs.map((x) => (x.id === c.id ? { ...x, readiness: v / 100 } : x))
+                      )
+                    }
+                  />
+
+                  <ScaleSlider
+                    label={t("ucaCount")}
+                    value={c.ucaCount ?? 0}
+                    min={0}
+                    max={5}
+                    onChange={(v) =>
+                      setControls((cs) =>
+                        cs.map((x) => (x.id === c.id ? { ...x, ucaCount: v } : x))
+                      )
+                    }
+                  />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </section>
+
+      {/* Constraints */}
+      <section className="max-w-6xl mx-auto px-4 py-4">
+        <SectionHeader title={t("constraintsTitle")} hint={t("constraintsHint")} />
+
+        <div className="grid grid-cols-1 gap-3">
+          {constraints.map((c) => (
+            <div key={c.id} className="bg-white rounded-2xl border border-slate-200 p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold">
+                  {c.id} — {c.statement}
+                </div>
+                {c.critical && (
+                  <div className="text-xs text-red-600 font-semibold mt-1">
+                    CRITICAL
+                  </div>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2">
+                {["pass", "warn", "fail"].map((st) => (
+                  <button
+                    key={st}
+                    onClick={() =>
+                      setConstraints((cs) =>
+                        cs.map((x) => (x.id === c.id ? { ...x, status: st } : x))
+                      )
+                    }
+                    className={`px-3 py-1 rounded-full text-sm font-semibold border ${
+                      c.status === st
+                        ? st === "pass"
+                          ? "bg-emerald-600 text-white border-emerald-600"
+                          : st === "warn"
+                          ? "bg-amber-400 text-black border-amber-400"
+                          : "bg-red-600 text-white border-red-600"
+                        : "bg-white border-slate-200 text-slate-700"
+                    }`}
+                  >
+                    {lang === "el" ? I18N.el[st] : st}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      {/* Incidents */}
+      <section className="max-w-6xl mx-auto px-4 py-4">
+        <SectionHeader title={t("incidentLogTitle")} hint={t("incidentLogHint")} />
+
+        <div className="bg-white rounded-2xl border border-slate-200 p-4 grid grid-cols-1 md:grid-cols-4 gap-3">
+          <select
+            value={incidentType}
+            onChange={(e) => setIncidentType(e.target.value)}
+            className="px-3 py-2 rounded-xl border border-slate-200 text-sm bg-white"
+          >
+            {incidentTypesEn.map((it) => (
+              <option key={it} value={it}>
+                {lang === "el" ? INCIDENTS_EN_TO_EL[it] : it}
+              </option>
+            ))}
+          </select>
+
+          <select
+            value={incidentHazardId}
+            onChange={(e) => setIncidentHazardId(e.target.value)}
+            className="px-3 py-2 rounded-xl border border-slate-200 text-sm bg-white"
+          >
+            {hazards.map((h) => (
+              <option key={h.id} value={h.id}>
+                {h.id} — {h.name}
+              </option>
+            ))}
+          </select>
+
+          <input
+            value={incidentNotes}
+            onChange={(e) => setIncidentNotes(e.target.value)}
+            placeholder={t("notesPlaceholder")}
+            className="px-3 py-2 rounded-xl border border-slate-200 text-sm bg-white md:col-span-1"
+          />
+
+          <button
+            onClick={logIncident}
+            className="px-3 py-2 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800"
+          >
+            {t("logIncident")}
+          </button>
+        </div>
+
+        <div className="mt-3 bg-white rounded-2xl border border-slate-200 p-4">
+          <div className="text-sm font-semibold mb-2">{t("recentIncidents")}</div>
+          {incidents.length === 0 ? (
+            <div className="text-sm text-slate-500">{t("noIncidents")}</div>
+          ) : (
+            <ul className="space-y-2">
+              {incidents.map((i) => (
+                <li key={i.id} className="text-sm flex flex-col md:flex-row md:items-center md:justify-between gap-1 border-b last:border-b-0 pb-2">
+                  <div>
+                    <span className="font-semibold">
+                      {lang === "el" ? INCIDENTS_EN_TO_EL[i.type] : i.type}
+                    </span>{" "}
+                    → {i.hazardId} ({hazards.find((h) => h.id === i.hazardId)?.name})
+                    {i.notes ? <div className="text-xs text-slate-600 mt-0.5">📝 {i.notes}</div> : null}
+                  </div>
+                  <div className="text-xs text-slate-500">
+                    {new Date(i.ts).toLocaleString()}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </section>
+
+      {/* Footer */}
+      <footer className="max-w-6xl mx-auto px-4 py-8 text-xs text-slate-500">
+        {t("mvpFooter")}
+      </footer>
+    </div>
+  );
+}
+
 // -----------------------------
+// Small UI helpers
+// -----------------------------
+function SectionHeader({ title, hint }) {
+  return (
+    <div className="mb-2">
+      <h3 className="text-lg font-semibold">{title}</h3>
+      {hint && <div className="text-xs text-slate-500">{hint}</div>}
+    </div>
+  );
+}
+
+function KpiCard({ title, value, hint }) {
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 p-4">
+      <div className="text-sm font-semibold">{title}</div>
+      <div className="text-2xl font-bold mt-1">{value}</div>
+      {hint && <div className="text-xs text-slate-500 mt-1">{hint}</div>}
+    </div>
+  );
+}
+
+function Badge({ label, tone = "slate" }) {
+  const tones = {
+    green: "bg-emerald-100 text-emerald-800 border-emerald-200",
+    amber: "bg-amber-100 text-amber-900 border-amber-200",
+    red: "bg-red-100 text-red-800 border-red-200",
+    slate: "bg-slate-100 text-slate-800 border-slate-200",
+  };
+  return (
+    <span className={`px-2 py-0.5 rounded-full text-xs font-semibold border ${tones[tone] || tones.slate}`}>
+      {label}
+    </span>
+  );
+}
+
+function ScaleSlider({ label, value, onChange, min = 1, max = 10 }) {
+  return (
+    <div className="bg-slate-50 rounded-xl p-2 border border-slate-200">
+      <div className="flex items-center justify-between text-xs">
+        <span className="font-semibold">{label}</span>
+        <span className="text-slate-600">{value}</span>
+      </div>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className="w-full mt-1"
+      />
+    </div>
+  );
+}
+
+function PercentSlider({ label, value, onChange }) {
+  return (
+    <div className="bg-slate-50 rounded-xl p-2 border border-slate-200">
+      <div className="flex items-center justify-between text-xs">
+        <span className="font-semibold">{label}</span>
+        <span className="text-slate-600">{value}%</span>
+      </div>
+      <input
+        type="range"
+        min={0}
+        max={100}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className="w-full mt-1"
+      />
+    </div>
+  );
+}
+
 export default RaceSafetyMVP;
